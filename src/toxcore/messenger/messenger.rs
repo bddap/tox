@@ -451,3 +451,1851 @@ impl Messenger {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::toxcore::dht::precomputed_cache::*;
+    use crate::toxcore::dht::packet::{EncryptedCookie, CryptoHandshake, CryptoHandshakePayload};
+    use crate::toxcore::dht::kbucket::*;
+
+    #[test]
+    fn file_transfers_clonable() {
+        let ft = FileTransfers::new();
+        let _ft_c = ft.clone();
+    }
+    #[test]
+    fn messenger_clonalble() {
+        let ms = Messenger::new();
+        let _ms_c = ms.clone();
+    }
+    #[test]
+    fn messenger_set_net_crypto() {
+        crypto_init().unwrap();
+        let (udp_tx, _udp_rx) = channel(1);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+        let mut ms = Messenger::new();
+        ms.set_net_crypto(net_crypto);
+    }
+    #[test]
+    fn messenger_set_tx_file_control() {
+        let (tx, _rx) = unbounded();
+        let mut ms = Messenger::new();
+        ms.set_tx_file_control(tx);
+    }
+    #[test]
+    fn messenger_set_tx_file_data() {
+        let (tx, _rx) = channel(2);
+        let mut ms = Messenger::new();
+        ms.set_tx_file_data(tx);
+    }
+    #[test]
+    fn messenger_send_file_seek() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 0;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        ms.send_file_seek(peer_real_pk, 0, 5).wait().unwrap();
+        assert_eq!(5, friend.files_receiving.read()[0].clone().unwrap().transferred);
+    }
+    #[test]
+    fn messenger_send_file_seek_no_friend() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let friend_list = HashMap::new();
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_seek(peer_real_pk, 0, 5).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_seek_friend_not_online() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 0;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::NotFriend;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_seek(peer_real_pk, 0, 5).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_seek_no_file_transfer() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 0;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = None;
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_seek(peer_real_pk, 0, 5).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_seek_transferring() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 0;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_seek(peer_real_pk, 0, 5).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_seek_position_exceed_size() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 1;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 0;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_seek(peer_real_pk, 0, 5).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_seek_no_net_crypto() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 0;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        assert!(ms.send_file_seek(peer_real_pk, 0, 5).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_control() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Kill).wait().unwrap();
+        assert_eq!(None, friend.files_receiving.read()[0]);
+    }
+    #[test]
+    fn messenger_send_file_control_kill_sending() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        friend.files_sending.write()[0] = Some(ft);
+        *friend.files_receiving.write() = Vec::new();
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        ms.send_file_control(peer_real_pk, 0, TransferDirection::Send, ControlType::Kill).wait().unwrap();
+        let friend_list = ms.friends_list.read();
+        let friend = friend_list.get(&peer_real_pk).unwrap();
+        assert_eq!(None, friend.files_sending.read()[0]);
+        assert_eq!(1, friend.num_sending_files);
+    }
+    #[test]
+    fn messenger_send_file_control_pause() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Pause).wait().unwrap();
+        assert_eq!(PauseStatus::US, friend.files_receiving.read()[0].clone().unwrap().pause);
+    }
+    #[test]
+    fn messenger_send_file_control_accept() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        ft.pause = PauseStatus::US;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Accept).wait().unwrap();
+        assert_eq!(PauseStatus::FT_NONE, friend.files_receiving.read()[0].clone().unwrap().pause);
+        assert_eq!(TransferStatus::Transferring, friend.files_receiving.read()[0].clone().unwrap().status);
+    }
+    #[test]
+    fn messenger_send_file_control_no_friend() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let friend_list = HashMap::new();
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Kill).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_control_no_file_transfer() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        *friend.files_receiving.write() = Vec::new();
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Kill).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_control_invalid_request() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        ft.pause = PauseStatus::US;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Pause).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_control_invalid_request_2() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        ft.pause = PauseStatus::OTHER;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Accept).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_control_invalid_request_3() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        ft.pause = PauseStatus::FT_NONE;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Accept).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_control_invalid_request_4() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Finished;
+        ft.size = 100;
+        ft.pause = PauseStatus::BOTH;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_control(peer_real_pk, 0, TransferDirection::Receive, ControlType::Accept).wait().is_err());
+    }
+    #[test]
+    fn messenger_send_file_control_invalid_request_5() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        ft.pause = PauseStatus::BOTH;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        friend.files_sending.write()[0] = Some(ft.clone());
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        assert!(ms.send_file_control(peer_real_pk, 0, TransferDirection::Send, ControlType::Accept).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_control_accept() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Accept);
+        ms.handle_file_control(peer_real_pk, packet).wait().unwrap();
+        assert_eq!(TransferStatus::Transferring, friend.files_receiving.read()[0].clone().unwrap().status);
+    }
+    #[test]
+    fn messenger_handle_file_control_accept_pause() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        ft.pause = PauseStatus::OTHER;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Accept);
+        ms.handle_file_control(peer_real_pk, packet).wait().unwrap();
+        assert_eq!(PauseStatus::FT_NONE, friend.files_receiving.read()[0].clone().unwrap().pause);
+    }
+    #[test]
+    fn messenger_handle_file_control_pause() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Pause);
+        ms.handle_file_control(peer_real_pk, packet).wait().unwrap();
+        assert_eq!(PauseStatus::OTHER, friend.files_receiving.read()[0].clone().unwrap().pause);
+    }
+    #[test]
+    fn messenger_handle_file_control_kill_receive() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Kill);
+        ms.handle_file_control(peer_real_pk, packet).wait().unwrap();
+        let friend = ms.friends_list.read();
+        let friend = friend.get(&peer_real_pk).unwrap();
+        assert_eq!(1, friend.num_sending_files);
+        assert_eq!(None, friend.files_receiving.read()[0]);
+    }
+    #[test]
+    fn messenger_handle_file_control_kill_send() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        friend.files_sending.write()[0] = Some(ft);
+        *friend.files_receiving.write() = Vec::new();
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Send, 0, ControlType::Kill);
+        ms.handle_file_control(peer_real_pk, packet).wait().unwrap();
+        let friend = ms.friends_list.read();
+        let friend = friend.get(&peer_real_pk).unwrap();
+        assert_eq!(None, friend.files_sending.read()[0]);
+    }
+    #[test]
+    fn messenger_handle_file_control_seek() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Seek(5));
+        ms.handle_file_control(peer_real_pk, packet).wait().unwrap();
+        let friend = ms.friends_list.read();
+        let friend = friend.get(&peer_real_pk).unwrap();
+        let ft = friend.files_receiving.read()[0].clone().unwrap();
+        assert_eq!(5, ft.requested);
+        assert_eq!(5, ft.transferred);
+    }
+    #[test]
+    fn messenger_handle_file_control_seek_invalid_request() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Seek(5));
+        assert!(ms.handle_file_control(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_control_seek_position_exceed_size() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 3;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Seek(5));
+        assert!(ms.handle_file_control(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_control_no_file_transfer() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = None;
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Seek(5));
+        ms.handle_file_control(peer_real_pk, packet).wait().unwrap();
+    }
+    #[test]
+    fn messenger_handle_file_control_no_file_transfer_2() {
+        crypto_init().unwrap();
+        let (peer_real_pk, peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 1;
+        *friend.files_sending.write() = Vec::new();
+        *friend.files_receiving.write() = Vec::new();
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let (udp_tx, _udp_rx) = channel(5);
+        let (lossless_tx, _lossless_rx) = unbounded();
+        let (lossy_tx, _lossy_rx) = unbounded();
+        let (dht_pk, dht_sk) = gen_keypair();
+        let (real_pk, real_sk) = gen_keypair();
+        let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
+        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+            udp_tx,
+            lossless_tx,
+            lossy_tx,
+            dht_pk,
+            dht_sk: dht_sk.clone(),
+            real_pk,
+            real_sk,
+            precomputed_keys,
+        });
+
+        let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
+        let addr = "127.0.0.1:12345".parse().unwrap();
+
+        net_crypto.add_connection(peer_real_pk, peer_dht_pk);
+        net_crypto.set_friend_udp_addr(peer_real_pk, addr);
+
+        let real_precomputed_key = precompute(&real_pk, &peer_real_sk);
+        let base_nonce = gen_nonce();
+        let session_pk = gen_keypair().0;
+        let our_encrypted_cookie = net_crypto.get_encrypted_cookie(peer_real_pk, peer_dht_pk);
+        let cookie = EncryptedCookie {
+            nonce: secretbox::gen_nonce(),
+            payload: vec![43; 88]
+        };
+        let crypto_handshake_payload = CryptoHandshakePayload {
+            base_nonce,
+            session_pk,
+            cookie_hash: our_encrypted_cookie.hash(),
+            cookie: cookie.clone()
+        };
+        let crypto_handshake = CryptoHandshake::new(&real_precomputed_key, &crypto_handshake_payload, our_encrypted_cookie);
+
+        net_crypto.handle_udp_crypto_handshake(&crypto_handshake, addr).wait().unwrap();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: Some(net_crypto),
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Seek(5));
+        assert!(ms.handle_file_control(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_control_no_friend() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let friend_list = HashMap::new();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileControl::new(TransferDirection::Receive, 0, ControlType::Seek(5));
+        assert!(ms.handle_file_control(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_send_request() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = None;
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileSendRequest::new(0, FileType::Data, 100, FileUID::new(), "1234".to_owned());
+        ms.handle_file_send_request(peer_real_pk, packet).wait().unwrap();
+        assert_eq!(TransferStatus::NotAccepted, friend.files_receiving.read()[0 as usize].clone().unwrap().status);
+        assert_eq!(100, friend.files_receiving.read()[0 as usize].clone().unwrap().size);
+    }
+    #[test]
+    fn messenger_handle_file_send_request_already_exist() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::NotAccepted;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileSendRequest::new(0, FileType::Data, 100, FileUID::new(), "1234".to_owned());
+        assert!(ms.handle_file_send_request(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_send_request_no_file_transfer() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        *friend.files_receiving.write() = Vec::new();
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileSendRequest::new(0, FileType::Data, 100, FileUID::new(), "1234".to_owned());
+        assert!(ms.handle_file_send_request(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_send_request_no_friend() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+
+        let friend_list = HashMap::new();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileSendRequest::new(0, FileType::Data, 100, FileUID::new(), "1234".to_owned());
+        assert!(ms.handle_file_send_request(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_data() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileData::new(0, vec![37; 10]);
+        ms.handle_file_data(peer_real_pk, packet).wait().unwrap();
+        assert_eq!(10, friend.files_receiving.read()[0].clone().unwrap().transferred);
+    }
+    #[test]
+    fn messenger_handle_file_data_drain() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 10;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileData::new(0, vec![37; 20]);
+        ms.handle_file_data(peer_real_pk, packet).wait().unwrap();
+        assert_eq!(10, friend.files_receiving.read()[0].clone().unwrap().transferred);
+    }
+    #[test]
+    fn messenger_handle_file_data_empty() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut ft = FileTransfers::new();
+        ft.status = TransferStatus::Transferring;
+        ft.size = 100;
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = Some(ft);
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileData::new(0, Vec::new());
+        ms.handle_file_data(peer_real_pk, packet).wait().unwrap();
+        assert_eq!(None, friend.files_receiving.read()[0].clone());
+    }
+    #[test]
+    fn messenger_handle_file_no_file_transfer() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        friend.files_receiving.write()[0] = None;
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileData::new(0, vec![1,2,3,4]);
+        assert!(ms.handle_file_data(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_no_file_transfer_2() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+        let mut friend = OnionFriend::new(peer_real_pk);
+        friend.num_sending_files = 2;
+        *friend.files_sending.write() = Vec::new();
+        *friend.files_receiving.write() = Vec::new();
+        friend.status = FriendStatus::Online;
+        let mut friend_list = HashMap::new();
+        let _friend = friend_list.insert(peer_real_pk, friend.clone());
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileData::new(0, vec![1,2,3,4]);
+        assert!(ms.handle_file_data(peer_real_pk, packet).wait().is_err());
+    }
+    #[test]
+    fn messenger_handle_file_no_friend() {
+        crypto_init().unwrap();
+        let (peer_real_pk, _peer_real_sk) = gen_keypair();
+        let (control_tx, _rx) = unbounded();
+        let (data_tx, _rx) = channel(5);
+
+        let friend_list = HashMap::new();
+
+        let ms = Messenger {
+            friends_list: Arc::new(RwLock::new(friend_list)),
+            recv_file_data_tx: Some(data_tx),
+            recv_file_control_tx: Some(control_tx),
+            net_crypto: None,
+        };
+
+        let packet = FileData::new(0, vec![1,2,3,4]);
+        assert!(ms.handle_file_data(peer_real_pk, packet).wait().is_err());
+    }
+}

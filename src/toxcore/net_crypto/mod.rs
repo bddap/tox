@@ -908,6 +908,13 @@ impl NetCrypto {
     pub fn set_dht_pk_sink(&self, dht_pk_tx: DhtPkTx) {
         *self.dht_pk_tx.write() = Some(dht_pk_tx);
     }
+
+    /// Create encrypted cookie for test functions
+    #[cfg(test)]
+    pub fn get_encrypted_cookie(&self, real_pk: PublicKey, dht_pk: PublicKey) -> EncryptedCookie {
+        let cookie = Cookie::new(real_pk, dht_pk);
+        EncryptedCookie::new(&self.symmetric_key, &cookie)
+    }
 }
 
 #[cfg(test)]

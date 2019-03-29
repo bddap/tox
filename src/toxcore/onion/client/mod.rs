@@ -41,7 +41,7 @@ use crate::toxcore::messenger::*;
 type DhtPkTx = mpsc::UnboundedSender<(PublicKey, PublicKey)>;
 
 /// Number of friend's close nodes to store.
-const MAX_ONION_FRIEND_NODES: u8 = 8;
+pub const MAX_ONION_FRIEND_NODES: u8 = 8;
 
 /// Number of nodes to announce ourselves to.
 const MAX_ONION_ANNOUNCE_NODES: u8 = 12;
