@@ -29,7 +29,7 @@ pub use self::user_status::*;
 pub use self::file_data::*;
 pub use self::status_message::*;
 pub use self::file_send_request::*;
-pub use self::group::*;
+pub use self::group::Packet as GroupPacket;
 
 /** Messenger packet enum that encapsulates all types of Messenger packets.
 */
@@ -99,7 +99,7 @@ impl FromBytes for Packet {
 
 #[cfg(test)]
 mod tests {
-    use super::{Packet, *};
+    use super::*;
 
     encode_decode_test!(
         packet_online_encode_decode,

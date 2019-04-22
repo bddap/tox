@@ -112,6 +112,18 @@ impl ToBytes for PeerInfo {
     }
 }
 
+impl PeerInfo {
+    /// Create new PeerInfo object.
+    pub fn new(peer_number: u16, real_pk: PublicKey, temp_pk: PublicKey, nickname: String) -> Self {
+        PeerInfo {
+            peer_number,
+            real_pk,
+            temp_pk,
+            nickname,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

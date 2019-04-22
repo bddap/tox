@@ -112,6 +112,8 @@ pub enum Packet {
     PeerLeave(PeerLeave),
     /// [`PeerLeave`](./struct.PeerLeave.html) structure.
     Query(Query),
+    /// [`QueryResponse`](./struct.QueryResponse.html) structure.
+    QueryResponse(QueryResponse),
     /// [`Title`](./struct.Title.html) structure.
     Title(Title),
     /// [`Ping`](./struct.Ping.html) structure.
@@ -140,6 +142,7 @@ impl ToBytes for Packet {
             Packet::PeerOnline(ref p) => p.to_bytes(buf),
             Packet::PeerLeave(ref p) => p.to_bytes(buf),
             Packet::Query(ref p) => p.to_bytes(buf),
+            Packet::QueryResponse(ref p) => p.to_bytes(buf),
             Packet::Title(ref p) => p.to_bytes(buf),
             Packet::Ping(ref p) => p.to_bytes(buf),
             Packet::NewPeer(ref p) => p.to_bytes(buf),
@@ -160,6 +163,7 @@ impl FromBytes for Packet {
         map!(PeerOnline::from_bytes, Packet::PeerOnline) |
         map!(PeerLeave::from_bytes, Packet::PeerLeave) |
         map!(Query::from_bytes, Packet::Query) |
+        map!(QueryResponse::from_bytes, Packet::QueryResponse) |
         map!(Title::from_bytes, Packet::Title) |
         map!(Ping::from_bytes, Packet::Ping) |
         map!(NewPeer::from_bytes, Packet::NewPeer) |
@@ -211,6 +215,14 @@ mod tests {
     encode_decode_test!(
         packet_query_encode_decode,
         Packet::Query(Query::new(1))
+    );
+
+    encode_decode_test!(
+        packet_query_response_encode_decode,
+        Packet::QueryResponse(QueryResponse::new(1, vec![
+            PeerInfo::new(1, gen_keypair().0, gen_keypair().0, "1234".to_owned()),
+            PeerInfo::new(2, gen_keypair().0, gen_keypair().0, "56789".to_owned()),
+            ]))
     );
 
     encode_decode_test!(
